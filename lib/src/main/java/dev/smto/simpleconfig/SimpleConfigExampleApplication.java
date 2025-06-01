@@ -2,6 +2,7 @@ package dev.smto.simpleconfig;
 
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
+import dev.smto.simpleconfig.api.ConfigAnnotations;
 
 import java.lang.reflect.Field;
 import java.nio.file.Path;
@@ -28,15 +29,18 @@ public class SimpleConfigExampleApplication {
 
     @SuppressWarnings("unused")
     public static class TestConfig {
+        @ConfigAnnotations.Section(section = "Test Section 1")
         public static String testString = "Hello World";
         public static int testInt = 42;
         public static boolean testBoolean = true;
         public static double testDouble = 3.14;
         public static float testFloat = 3.14f;
+        @ConfigAnnotations.Section(section = "Test Section 2")
         public static ArrayList<String> testList = new ArrayList<>() {{
             this.add("Hello");
             this.add("World");
         }};
+        @ConfigAnnotations.Comment(comment = "Line 1\nLine 2\nLine 3")
         public static Map<String, Integer> testMap = new HashMap<>() {{
             this.put("Hello", 1);
             this.put("World", 2);

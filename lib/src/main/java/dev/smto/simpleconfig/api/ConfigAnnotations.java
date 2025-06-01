@@ -8,6 +8,12 @@ import java.lang.annotation.Target;
 public class ConfigAnnotations {
     @Retention(RetentionPolicy.RUNTIME)
     @Target(ElementType.FIELD)
+    public @interface Section {
+        String section();
+    }
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.FIELD)
     public @interface Comment {
         String comment();
     }

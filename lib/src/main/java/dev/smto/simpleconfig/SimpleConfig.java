@@ -2,21 +2,25 @@ package dev.smto.simpleconfig;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
-import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.DataResult;
 import com.mojang.serialization.DynamicOps;
 import com.mojang.serialization.JsonOps;
 import dev.smto.simpleconfig.api.ConfigAnnotations;
+import dev.smto.simpleconfig.api.ConfigDecoration;
 import dev.smto.simpleconfig.api.ConfigEntry;
 import dev.smto.simpleconfig.api.ConfigLogger;
-import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
-import java.lang.reflect.*;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * A dead simple config system, using some reflection.
@@ -31,31 +35,6 @@ public class SimpleConfig {
 
     private final Path configFilePath;
     private final List<ConfigEntry<?>> configEntries = new ArrayList<>();
-
-    private static ConfigEntry<?> createTypedConfigEntry(String key, String comment, Field field, Codec<?> codec) throws NoSuchMethodException, InvocationTargetException, InstantiationException, IllegalAccessException {
-        java.lang.reflect.Type configEntryType = new ParameterizedType() {
-            @Override
-            public @NotNull java.lang.reflect.Type[] getActualTypeArguments() {
-                return new java.lang.reflect.Type[]{field.getType()};
-            }
-
-            @Override
-            public @NotNull java.lang.reflect.Type getRawType() {
-                return ConfigEntry.class;
-            }
-
-            @Override
-            public java.lang.reflect.Type getOwnerType() {
-                return null;
-            }
-        };
-
-        Constructor<?> constructor = ConfigEntry.class.getConstructor(
-                String.class, String.class, Field.class, Codec.class
-        );
-
-        return (ConfigEntry<?>) constructor.newInstance(key, comment, field, codec);
-    }
 
     /**
      * Creates a new instance of SimpleConfig.
@@ -87,6 +66,10 @@ public class SimpleConfig {
         this.logger = logger;
         this.configFilePath = file;
         for (Field field : configClass.getFields()) {
+            String section = null;
+            var sectionAnnotation = field.getAnnotation(ConfigAnnotations.Section.class);
+            if (sectionAnnotation != null) section = sectionAnnotation.section();
+
             String comment = null;
             var commentAnnotation = field.getAnnotation(ConfigAnnotations.Comment.class);
             if (commentAnnotation != null) comment = commentAnnotation.comment();
@@ -99,7 +82,7 @@ public class SimpleConfig {
             }
 
             try {
-                this.configEntries.add(new ConfigEntry<>(field.getName(), comment, field, codec));
+                this.configEntries.add(new ConfigEntry<>(field.getName(), new ConfigDecoration(section, comment), field, codec));
             } catch (Throwable x) {
                 throw new RuntimeException(x);
             }
@@ -130,14 +113,14 @@ public class SimpleConfig {
                     for (ConfigEntry<?> field : this.configEntries) {
                         if (data[0].trim().equals(field.key())) {
                             try {
-                                var nData = data[1];
+                                StringBuilder nData = new StringBuilder(data[1]);
                                 if (data.length > 2) {
                                     for(int i = 2; i < data.length; i++) {
-                                        nData += "=" + data[i];
+                                        nData.append("=").append(data[i]);
                                     }
                                 }
                                 try {
-                                    boolean success = this.applyToField(field, nData.trim());
+                                    boolean success = this.applyToField(field, nData.toString().trim());
                                     if (!success) throw new RuntimeException("Could not set field: \"" + field.key() + "\"");
                                     break;
                                 } catch (Exception ignored) {
@@ -183,9 +166,19 @@ public class SimpleConfig {
         try {
             var out = new StringBuilder();
             for (ConfigEntry<?> field : this.configEntries) {
-                if (field.comment() != null) {
-                    for (String s : field.comment().split("\n")) {
-                        out.append("# ").append(s).append("\n");
+                if (field.decorations() != null) {
+                    if (field.decorations().section() != null) {
+                        StringBuilder sectionLength = new StringBuilder();
+                        sectionLength.append("=".repeat(field.decorations().section().length()));
+                        out.append("# ").append(sectionLength).append("\n");
+                        out.append("# ");
+                        out.append(field.decorations().section()).append("\n");
+                        out.append("# ").append(sectionLength).append("\n");
+                    }
+                    if (field.decorations().comment() != null) {
+                        for (String s : field.decorations().comment().split("\n")) {
+                            out.append("# ").append(s).append("\n");
+                        }
                     }
                 }
                 try {
@@ -200,6 +193,10 @@ public class SimpleConfig {
         } catch (Exception ignored) {
             this.logger.error("Could not write config file \""+ this.configFilePath.getFileName().toString() +"\"! Changes will not be saved!");
         }
+    }
+
+    public void reload() {
+        this.read();
     }
 
     /**

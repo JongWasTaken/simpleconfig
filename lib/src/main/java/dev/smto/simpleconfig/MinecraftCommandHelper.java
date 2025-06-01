@@ -1,13 +1,13 @@
 package dev.smto.simpleconfig;
 
-import com.mojang.brigadier.builder.RequiredArgumentBuilder;
+import com.mojang.brigadier.builder.ArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.BiFunction;
 
 import static com.mojang.brigadier.arguments.StringArgumentType.getString;
 import static com.mojang.brigadier.arguments.StringArgumentType.string;
@@ -36,23 +36,30 @@ public class MinecraftCommandHelper {
         return false;
     }
 
-    public RequiredArgumentBuilder<Object, String> createGetValueCommandNode(BiFunction<String, String, Integer> callback) {
+    @FunctionalInterface
+    public interface GetValueCommandNodeCallback {
+        int run(CommandContext<?> context, String key, String value);
+    }
+
+    @FunctionalInterface
+    public interface SetValueCommandNodeCallback {
+        int run(CommandContext<?> context, String key, String value, boolean success);
+    }
+
+    public ArgumentBuilder<?, ?> createCommandNode(GetValueCommandNodeCallback callback1, SetValueCommandNodeCallback callback2) {
         return argument("key", string()).executes(context -> {
             var key = getString(context, "key");
             var value = this.get(key);
-            return callback.apply(key, value);
-        }).suggests((commandContext, suggestionsBuilder) -> this.suggestMatchingKeys(suggestionsBuilder));
+            return callback1.run(context, key, value);
+        }).suggests((commandContext, suggestionsBuilder) -> this.suggestMatchingKeys(suggestionsBuilder))
+                .then(argument("value", string()).executes(context -> {
+                    var key = getString(context, "key");
+                    var value = getString(context, "value");
+                    if (this.set(key, value)) return callback2.run(context, key, value, true);
+                    else return callback2.run(context, key, null, false);
+                }).suggests((commandContext, suggestionsBuilder) -> this.suggestMatchingValues(commandContext.getArgument("key", String.class), suggestionsBuilder)));
     }
 
-    public RequiredArgumentBuilder<Object, String> createSetValueCommandNode(BiFunction<String, String, Integer> callback) {
-        return argument("value", string()).executes(context -> {
-            var key = getString(context, "key");
-            var value = getString(context, "value");
-            if (this.set(key, value)) return callback.apply(key, value);
-            else return callback.apply(key, null);
-        }).suggests((commandContext, suggestionsBuilder) -> this.suggestMatchingValues(commandContext.getArgument("key", String.class), suggestionsBuilder));
-
-    }
     public CompletableFuture<Suggestions> suggestMatchingValues(String key, SuggestionsBuilder builder) {
         String string = builder.getRemaining().toLowerCase(Locale.ROOT);
 
