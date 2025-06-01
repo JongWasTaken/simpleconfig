@@ -1,12 +1,19 @@
 package dev.smto.simpleconfig;
 
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
+import com.mojang.datafixers.util.Pair;
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.DataResult;
+import com.mojang.serialization.DynamicOps;
+import com.mojang.serialization.JsonOps;
 import dev.smto.simpleconfig.api.ConfigAnnotations;
 import dev.smto.simpleconfig.api.ConfigEntry;
 import dev.smto.simpleconfig.api.ConfigLogger;
-import dev.smto.simpleconfig.serializers.TypeSerializers;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
+import java.lang.reflect.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -23,7 +30,32 @@ public class SimpleConfig {
     }
 
     private final Path configFilePath;
-    private final List<ConfigEntry> configEntries = new ArrayList<>();
+    private final List<ConfigEntry<?>> configEntries = new ArrayList<>();
+
+    private static ConfigEntry<?> createTypedConfigEntry(String key, String comment, Field field, Codec<?> codec) throws NoSuchMethodException, InvocationTargetException, InstantiationException, IllegalAccessException {
+        java.lang.reflect.Type configEntryType = new ParameterizedType() {
+            @Override
+            public @NotNull java.lang.reflect.Type[] getActualTypeArguments() {
+                return new java.lang.reflect.Type[]{field.getType()};
+            }
+
+            @Override
+            public @NotNull java.lang.reflect.Type getRawType() {
+                return ConfigEntry.class;
+            }
+
+            @Override
+            public java.lang.reflect.Type getOwnerType() {
+                return null;
+            }
+        };
+
+        Constructor<?> constructor = ConfigEntry.class.getConstructor(
+                String.class, String.class, Field.class, Codec.class
+        );
+
+        return (ConfigEntry<?>) constructor.newInstance(key, comment, field, codec);
+    }
 
     /**
      * Creates a new instance of SimpleConfig.
@@ -31,7 +63,7 @@ public class SimpleConfig {
      * @param configClass Class holding the static fields defining this config
      */
     public SimpleConfig(Path file, Class<?> configClass) {
-        this(file, configClass, ConfigLoggers.NONE);
+        this(file, configClass, ConfigLoggers.NONE, new HashMap<>());
     }
 
     /**
@@ -41,6 +73,17 @@ public class SimpleConfig {
      * @param logger Logger to use, check the ConfigLoggers class
      */
     public SimpleConfig(Path file, Class<?> configClass, ConfigLogger logger) {
+        this(file, configClass, logger, new HashMap<>());
+    }
+
+    /**
+     * Creates a new instance of SimpleConfig.
+     * @param file Target path, which will be used without modification, so make sure it is valid!
+     * @param configClass Class holding the static fields defining this config
+     * @param logger Logger to use, check the ConfigLoggers class
+     * @param codecOverrides Assign custom codecs for specific field names
+     */
+    public SimpleConfig(Path file, Class<?> configClass, ConfigLogger logger, Map<String, Codec<?>> codecOverrides) {
         this.logger = logger;
         this.configFilePath = file;
         for (Field field : configClass.getFields()) {
@@ -48,12 +91,18 @@ public class SimpleConfig {
             var commentAnnotation = field.getAnnotation(ConfigAnnotations.Comment.class);
             if (commentAnnotation != null) comment = commentAnnotation.comment();
 
-            String holds = null;
-            var annotation = field.getAnnotation(ConfigAnnotations.Holds.class);
-            if (annotation != null) holds = annotation.type().getSimpleName();
+            Codec<?> codec;
+            if (codecOverrides.containsKey(field.getName())) {
+                codec = codecOverrides.get(field.getName());
+            } else {
+                codec = CodecHandler.get(field);
+            }
 
-            this.logger.debug("Config reference \"" + field.getName() + "\" is of type \""+ field.getType().getSimpleName() +"\", nestedType \""+ holds +"\"");
-            this.configEntries.add(new ConfigEntry(field.getName(), comment, field, field.getType(), holds));
+            try {
+                this.configEntries.add(new ConfigEntry<>(field.getName(), comment, field, codec));
+            } catch (Throwable x) {
+                throw new RuntimeException(x);
+            }
         }
 
         try {
@@ -78,21 +127,23 @@ public class SimpleConfig {
             try {
                 for (String line : Files.readAllLines(this.configFilePath)) {
                     var data = line.split("#")[0].trim().split("=");
-                    for (ConfigEntry field : this.configEntries) {
+                    for (ConfigEntry<?> field : this.configEntries) {
                         if (data[0].trim().equals(field.key())) {
-                            var nData = data[1];
-                            if (data.length > 2) {
-                                for(int i = 2; i < data.length; i++) {
-                                    nData += "=" + data[i];
-                                }
-                            }
                             try {
-                                boolean success = this.applyToField(field, nData.trim());
-                                if (!success) throw new RuntimeException("Could not set field: \"" + field.key() + "\"");
-                                break;
-                            } catch (Exception ignored) {
-                                this.logger.warn("Could not fully read config file \""+this.configFilePath.getFileName().toString()+"\"!");
-                            }
+                                var nData = data[1];
+                                if (data.length > 2) {
+                                    for(int i = 2; i < data.length; i++) {
+                                        nData += "=" + data[i];
+                                    }
+                                }
+                                try {
+                                    boolean success = this.applyToField(field, nData.trim());
+                                    if (!success) throw new RuntimeException("Could not set field: \"" + field.key() + "\"");
+                                    break;
+                                } catch (Exception ignored) {
+                                    this.logger.warn("Could not fully read config file \""+this.configFilePath.getFileName().toString()+"\"!");
+                                }
+                            } catch (Throwable ignored) {}
                         }
                     }
                 }
@@ -102,6 +153,28 @@ public class SimpleConfig {
         }
     }
 
+    private String encodeField(ConfigEntry<?> field) {
+        if (field.codec() == null) {
+            return "";
+        }
+
+        Method m;
+        try {
+            m = field.codec().getClass().getMethod("encodeStart", DynamicOps.class, Object.class);
+        } catch (NoSuchMethodException e) {
+            throw new RuntimeException(e);
+        }
+        DataResult<?> d;
+        try {
+            d = (DataResult<?>) m.invoke(field.codec(), JsonOps.INSTANCE, field.reference().get(null));
+        } catch (IllegalAccessException | InvocationTargetException e) {
+            throw new RuntimeException(e);
+        }
+        var res = (JsonElement) d.resultOrPartial(this.logger::warn).orElseThrow();
+        System.out.println(res);
+        return res.toString();
+    }
+
     /**
      * Writes all values of the config class to the target file.
      */
@@ -109,13 +182,17 @@ public class SimpleConfig {
         // Write current values to the file
         try {
             var out = new StringBuilder();
-            for (ConfigEntry field : this.configEntries) {
+            for (ConfigEntry<?> field : this.configEntries) {
                 if (field.comment() != null) {
                     for (String s : field.comment().split("\n")) {
                         out.append("# ").append(s).append("\n");
                     }
                 }
-                out.append(field.key()).append("=").append(field.reference().get(null)).append("\n");
+                try {
+                    out.append(field.key()).append("=").append(this.encodeField(field)).append("\n");
+                } catch (Throwable ignored) {
+                    out.append("null").append("\n");
+                }
             }
             Files.writeString(this.configFilePath, ""); // if this write fails, the file will not be deleted due to the exception
             Files.delete(this.configFilePath);
@@ -130,7 +207,7 @@ public class SimpleConfig {
      * Returns true if the value was set, false if it was not found or could not be set.
      */
     public boolean trySet(String key, String value) {
-        for (ConfigEntry entry : this.configEntries) {
+        for (ConfigEntry<?> entry : this.configEntries) {
             if (entry.key().equals(key)) {
                 return this.applyToField(entry, value);
             }
@@ -138,35 +215,26 @@ public class SimpleConfig {
         return false;
     }
 
-    private boolean applyToField(ConfigEntry entry, String value) {
-        String type = entry.type().getSimpleName().toLowerCase(Locale.ROOT);
-        String holds = null;
-        if (entry.nestedType() != null) holds = entry.nestedType().toLowerCase(Locale.ROOT);
-        this.logger.debug("Applying value \""+value+"\" to config entry \""+entry.key()+"\" of type \""+type+"\"");
+    private boolean applyToField(ConfigEntry<?> entry, String value) {
+        JsonElement parsed;
         try {
-            return TypeSerializers.get(type).serialize(entry, value, holds);
+            parsed = JsonParser.parseString(value);
+        } catch (Throwable ignored) {
+            return false;
+        }
+        try {
+            this.logger.debug("Applying value \""+value+"\" to config entry \""+entry.key()+"\"");
+            var newVal = entry.codec().parse(JsonOps.INSTANCE, parsed).resultOrPartial().orElseThrow();
+            if (newVal instanceof List) {
+                newVal = new ArrayList<>((List<?>) newVal);
+            }
+            entry.reference().set(null, newVal);
         } catch (Throwable ignored) {
             this.logger.warn("Could not apply value \""+value+"\" to config entry \""+entry.key()+"\"!");
+            return false;
         }
-        return false;
-    }
 
-    public record Pair<T, U>(T first, U second) {}
-
-    /**
-     * Returns immutable pairs of all config keys and values as a list for presentation purposes, which can then be used for GUIs or commands for example.
-     */
-    public List<Pair<String,String>> toPairList() {
-        var out = new ArrayList<Pair<String,String>>();
-        for (ConfigEntry entry : this.configEntries) {
-            try {
-                out.add(new Pair<>(entry.key(), entry.reference().get(null).toString()));
-            } catch (Throwable ignored) {
-                this.logger.warn("Could not get value of config entry \""+entry.key()+"\"!");
-                out.add(new Pair<>(entry.key(), ""));
-            }
-        }
-        return out;
+        return true;
     }
 
     /**
@@ -181,15 +249,29 @@ public class SimpleConfig {
      */
     public HashMap<String,String> toMap() {
         var out = new HashMap<String,String>();
-        for (ConfigEntry entry : this.configEntries) {
+        for (ConfigEntry<?> entry : this.configEntries) {
             try {
-                out.put(entry.key(), entry.reference().get(null).toString());
+                out.put(entry.key(), this.encodeField(entry));
             } catch (Throwable ignored) {
                 this.logger.warn("Could not get value of config entry \""+entry.key()+"\"!");
                 out.put(entry.key(), "");
             }
         }
         return out;
+    }
+
+    /**
+     * Creates a Helper class which makes interacting with the config file easier when using Minecraft commands.
+     * You should save the return value of this method to a variable.
+     * NOTE: This class uses com.mojang.brigadier.*! This method will return null if it is not present.
+     */
+    public MinecraftCommandHelper getMinecraftCommandHelper() {
+        try {
+            Class.forName("com.mojang.brigadier.suggestion.Suggestion", false, this.getClass().getClassLoader());
+            return new MinecraftCommandHelper(this);
+        } catch (ClassNotFoundException e) {
+            return null;
+        }
     }
 }
 

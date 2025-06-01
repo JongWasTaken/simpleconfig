@@ -11,10 +11,4 @@ public class ConfigAnnotations {
     public @interface Comment {
         String comment();
     }
-
-    @Retention(RetentionPolicy.RUNTIME)
-    @Target(ElementType.FIELD)
-    public @interface Holds {
-        Class<?> type();
-    }
 }

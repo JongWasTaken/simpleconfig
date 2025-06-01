@@ -1,7 +1,7 @@
 package dev.smto.simpleconfig.api;
 
-import org.jetbrains.annotations.Nullable;
+import com.mojang.serialization.Codec;
 
 import java.lang.reflect.Field;
 
-public record ConfigEntry(String key, String comment, Field reference, Class<?> type, @Nullable String nestedType) {}
+public record ConfigEntry<T>(String key, String comment, Field reference, Codec<T> codec) {}

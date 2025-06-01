@@ -19,10 +19,15 @@ java {
 repositories {
     // Use Maven Central for resolving dependencies.
     mavenCentral()
+    maven {
+        url "https://libraries.minecraft.net"
+    }
 }
 
 dependencies {
-    implementation("org.jetbrains:annotations:24.1.0")
+    compileOnly("org.jetbrains:annotations:24.1.0")
+    compileOnly("com.mojang:datafixerupper:8.0.16")
+    compileOnly("com.mojang:brigadier:1.3.10")
 }
 
 // Apply a specific Java toolchain to ease working on different environments.
@@ -47,7 +52,7 @@ publishing {
         maven(MavenPublication) {
             groupId = "dev.smto"
             artifactId = "simpleconfig"
-            version = "1.1.0"
+            version = "2.0.0"
             from components.java
         }
     }
