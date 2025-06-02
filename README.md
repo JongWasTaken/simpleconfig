@@ -65,7 +65,7 @@ The following types have builtin codec mappings:
 - `Map` of any of the above types
 - `Pair` of any of the above types
 
-The override the codec used for a specific field, pass a map of codec overrides to the constructor of `SimpleConfig`.  
+To override the codec used for a specific field, pass a map of codec overrides to the constructor of `SimpleConfig`.  
 The key is the name of the field, and the value is the codec to use for that field.  
 Codec overrides always have priority over builtin codecs.  
   
