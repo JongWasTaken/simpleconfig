@@ -52,7 +52,7 @@ publishing {
         maven(MavenPublication) {
             groupId = "dev.smto"
             artifactId = "simpleconfig"
-            version = "2.1.0"
+            version = "2.3.0"
             from components.java
         }
     }

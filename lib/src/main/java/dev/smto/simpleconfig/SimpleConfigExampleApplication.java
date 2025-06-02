@@ -12,7 +12,7 @@ import java.util.Map;
 
 public class SimpleConfigExampleApplication {
     public static void main(String[] args) {
-        SimpleConfig configManager = new SimpleConfig(Path.of("test.conf"), TestConfig.class, ConfigLoggers.SYSTEM_OUT, new HashMap<>() {{
+        SimpleConfig configManager = new SimpleConfig(Path.of("test.conf"), TestConfig.class, ConfigLoggers.SYSTEM_OUT, ConfigTranscoders.JSON, new HashMap<>() {{
             this.put("testRecord", TestRecord.CODEC);
         }});
         if (configManager.getMinecraftCommandHelper() == null) {

@@ -1,15 +1,9 @@
 package dev.smto.simpleconfig;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonParser;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.DataResult;
 import com.mojang.serialization.DynamicOps;
-import com.mojang.serialization.JsonOps;
-import dev.smto.simpleconfig.api.ConfigAnnotations;
-import dev.smto.simpleconfig.api.ConfigDecoration;
-import dev.smto.simpleconfig.api.ConfigEntry;
-import dev.smto.simpleconfig.api.ConfigLogger;
+import dev.smto.simpleconfig.api.*;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -23,7 +17,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A dead simple config system, using some reflection.
+ * A dead simple config system.
  */
 @SuppressWarnings("unused")
 public class SimpleConfig {
@@ -33,8 +27,11 @@ public class SimpleConfig {
         this.logger = logger;
     }
 
+    private final ConfigTranscoder transcoder;
     private final Path configFilePath;
     private final List<ConfigEntry<?>> configEntries = new ArrayList<>();
+
+    private MinecraftCommandHelper minecraftCommandHelper = null;
 
     /**
      * Creates a new instance of SimpleConfig.
@@ -42,7 +39,7 @@ public class SimpleConfig {
      * @param configClass Class holding the static fields defining this config
      */
     public SimpleConfig(Path file, Class<?> configClass) {
-        this(file, configClass, ConfigLoggers.NONE, new HashMap<>());
+        this(file, configClass, ConfigLoggers.NONE, ConfigTranscoders.JSON, new HashMap<>());
     }
 
     /**
@@ -52,7 +49,17 @@ public class SimpleConfig {
      * @param logger Logger to use, check the ConfigLoggers class
      */
     public SimpleConfig(Path file, Class<?> configClass, ConfigLogger logger) {
-        this(file, configClass, logger, new HashMap<>());
+        this(file, configClass, logger, ConfigTranscoders.JSON, new HashMap<>());
+    }
+
+    /**
+     * Creates a new instance of SimpleConfig.
+     * @param file Target path, which will be used without modification, so make sure it is valid!
+     * @param configClass Class holding the static fields defining this config
+     * @param codecOverrides Assign custom codecs for specific field names
+     */
+    public SimpleConfig(Path file, Class<?> configClass, Map<String, Codec<?>> codecOverrides) {
+        this(file, configClass, ConfigLoggers.NONE, ConfigTranscoders.JSON, codecOverrides);
     }
 
     /**
@@ -63,8 +70,32 @@ public class SimpleConfig {
      * @param codecOverrides Assign custom codecs for specific field names
      */
     public SimpleConfig(Path file, Class<?> configClass, ConfigLogger logger, Map<String, Codec<?>> codecOverrides) {
+        this(file, configClass, logger, ConfigTranscoders.JSON, codecOverrides);
+    }
+
+    /**
+     * Creates a new instance of SimpleConfig.
+     * @param file Target path, which will be used without modification, so make sure it is valid!
+     * @param configClass Class holding the static fields defining this config
+     * @param logger Logger to use, check the ConfigLoggers class
+     * @param transcoder Transcoder to use, default is ConfigTranscoders.JSON
+     */
+    public SimpleConfig(Path file, Class<?> configClass, ConfigLogger logger, ConfigTranscoder<?> transcoder) {
+        this(file, configClass, logger, transcoder, new HashMap<>());
+    }
+
+    /**
+     * Creates a new instance of SimpleConfig.
+     * @param file Target path, which will be used without modification, so make sure it is valid!
+     * @param configClass Class holding the static fields defining this config
+     * @param logger Logger to use, check the ConfigLoggers class
+     * @param transcoder Transcoder to use, default is ConfigTranscoders.JSON
+     * @param codecOverrides Assign custom codecs for specific field names
+     */
+    public SimpleConfig(Path file, Class<?> configClass, ConfigLogger logger, ConfigTranscoder<?> transcoder, Map<String, Codec<?>> codecOverrides) {
         this.logger = logger;
         this.configFilePath = file;
+        this.transcoder = transcoder;
         for (Field field : configClass.getFields()) {
             String section = null;
             var sectionAnnotation = field.getAnnotation(ConfigAnnotations.Section.class);
@@ -78,7 +109,7 @@ public class SimpleConfig {
             if (codecOverrides.containsKey(field.getName())) {
                 codec = codecOverrides.get(field.getName());
             } else {
-                codec = CodecHandler.get(field);
+                codec = ConfigCodecs.get(field);
             }
 
             try {
@@ -99,6 +130,11 @@ public class SimpleConfig {
         }
         this.read();
         this.write();
+
+        try {
+            Class.forName("com.mojang.brigadier.suggestion.Suggestion", false, this.getClass().getClassLoader());
+            this.minecraftCommandHelper = new MinecraftCommandHelper(this);
+        } catch (ClassNotFoundException ignored) {}
     }
 
     /**
@@ -126,7 +162,9 @@ public class SimpleConfig {
                                 } catch (Exception ignored) {
                                     this.logger.warn("Could not fully read config file \""+this.configFilePath.getFileName().toString()+"\"!");
                                 }
-                            } catch (Throwable ignored) {}
+                            } catch (Throwable ignored) {
+                                this.logger.error("Failed to parse config file line: \""+line+"\"!");
+                            }
                         }
                     }
                 }
@@ -147,15 +185,13 @@ public class SimpleConfig {
         } catch (NoSuchMethodException e) {
             throw new RuntimeException(e);
         }
-        DataResult<?> d;
+        String out;
         try {
-            d = (DataResult<?>) m.invoke(field.codec(), JsonOps.INSTANCE, field.reference().get(null));
+            out = this.transcoder.processEncoderOutput(((DataResult<?>) m.invoke(field.codec(), this.transcoder.getOps(), field.reference().get(null))).resultOrPartial(this.logger::warn));
         } catch (IllegalAccessException | InvocationTargetException e) {
             throw new RuntimeException(e);
         }
-        var res = (JsonElement) d.resultOrPartial(this.logger::warn).orElseThrow();
-        System.out.println(res);
-        return res.toString();
+        return out;
     }
 
     /**
@@ -184,7 +220,8 @@ public class SimpleConfig {
                 try {
                     out.append(field.key()).append("=").append(this.encodeField(field)).append("\n");
                 } catch (Throwable ignored) {
-                    out.append("null").append("\n");
+                    this.logger.warn("Failed to encode field: \""+field.key()+"\"! This could indicate a broken codec or input.");
+                    out.append("\n");
                 }
             }
             Files.writeString(this.configFilePath, ""); // if this write fails, the file will not be deleted due to the exception
@@ -213,21 +250,20 @@ public class SimpleConfig {
     }
 
     private boolean applyToField(ConfigEntry<?> entry, String value) {
-        JsonElement parsed;
-        try {
-            parsed = JsonParser.parseString(value);
-        } catch (Throwable ignored) {
+        var parsed = this.transcoder.processDecoderInput(value);
+        if (parsed == null) {
             return false;
         }
         try {
             this.logger.debug("Applying value \""+value+"\" to config entry \""+entry.key()+"\"");
-            var newVal = entry.codec().parse(JsonOps.INSTANCE, parsed).resultOrPartial().orElseThrow();
+            var newVal = entry.codec().parse(this.transcoder.getOps(), parsed).resultOrPartial().orElseThrow();
+            // codec.parse always returns an immutable list
             if (newVal instanceof List) {
                 newVal = new ArrayList<>((List<?>) newVal);
             }
             entry.reference().set(null, newVal);
         } catch (Throwable ignored) {
-            this.logger.warn("Could not apply value \""+value+"\" to config entry \""+entry.key()+"\"!");
+            this.logger.warn("Failed to decode \""+value+"\" for config entry \""+entry.key()+"\"! This could indicate a broken codec or input.");
             return false;
         }
 
@@ -258,17 +294,11 @@ public class SimpleConfig {
     }
 
     /**
-     * Creates a Helper class which makes interacting with the config file easier when using Minecraft commands.
-     * You should save the return value of this method to a variable.
-     * NOTE: This class uses com.mojang.brigadier.*! This method will return null if it is not present.
+     * Returns a helper class which makes interacting with the config file easier when using Minecraft commands.
+     * NOTE: This class uses com.mojang.brigadier.*! This method will return null if that library is not present in the classpath.
      */
     public MinecraftCommandHelper getMinecraftCommandHelper() {
-        try {
-            Class.forName("com.mojang.brigadier.suggestion.Suggestion", false, this.getClass().getClassLoader());
-            return new MinecraftCommandHelper(this);
-        } catch (ClassNotFoundException e) {
-            return null;
-        }
+        return this.minecraftCommandHelper;
     }
 }
 
